@@ -1,0 +1,10 @@
+Metadata-Version: 1.0
+Name: chm2pdf
+Version: 0.9.1
+Summary: A script to convert CHM files into PDF
+Home-page: http://code.google.com/p/chm2pdf/
+Author: Massimo Sandal, Chris Karakas
+Author-email: devicerandom@gmail.com, chris@karakas-online.de
+License: GPL v.2.
+Description: A script to convert CHM files into PDF. Requires chmlib, pychm, htmldoc.
+Platform: UNKNOWN

@@ -1,0 +1,1112 @@
+#!/usr/bin/python
+'''
+CHM2PDF v. 0.9.1
+http://code.google.com/p/chm2pdf
+
+A script that converts a CHM compiled HTML file into a single PDF file.
+(c) 2007 Massimo Sandal
+(c) 2007 Chris Karakas <http://www.karakas-online.de>
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 2 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+'''
+
+import chm.chm as chm
+import sys
+import sgmllib
+import os, os.path
+import re, glob
+import getopt
+# from BeautifulSoup import BeautifulSoup
+
+global version
+
+global CHM2PDF_TEMP_WORK_DIR #where conversions etc. take place
+global CHM2PDF_TEMP_ORIG_DIR #where the chm file is exploded
+global CHM2PDF_WORK_DIR
+global CHM2PDF_ORIG_DIR
+
+global filename #the input filename
+
+version = '0.9.1'
+CHM2PDF_TEMP_WORK_DIR='/tmp/chm2pdf/work' 
+CHM2PDF_TEMP_ORIG_DIR='/tmp/chm2pdf/orig'
+
+
+
+# YOU DON'T NEED TO CHANGE ANYTHING BELOW THIS LINE!
+
+
+class PageLister(sgmllib.SGMLParser):
+    '''
+    parser of the chm.chm GetTopicsTree() method that retrieves the URL of the HTML
+    page embedded in the CHM file.
+    '''
+    def reset(self):
+        sgmllib.SGMLParser.reset(self)
+        self.pages=[]
+        
+    def start_param(self,attrs):
+       urlparam_flag=False
+       for key,value in attrs:
+           if key=='name' and value=='Local':
+               urlparam_flag=True
+           if urlparam_flag and key=='value':
+               self.pages.append('/'+value)  
+     
+class ImageCatcher(sgmllib.SGMLParser):
+    '''
+    finds image urls in the current html page, so to take them out from the chm file.
+    '''
+    def reset(self):
+        sgmllib.SGMLParser.reset(self)
+        self.imgurls=[]
+        
+    def start_img(self,attrs):
+        for key,value in attrs:
+            if key=='src' or key=='SRC':
+                # Avoid duplicates in the list of image URLs.
+                if not self.imgurls.count(value):
+                    self.imgurls.append(value)
+     
+class CssCatcher(sgmllib.SGMLParser):
+    '''
+    finds CSS urls in the current html page, so to take them out from the chm file.
+    '''
+    def reset(self):
+        sgmllib.SGMLParser.reset(self)
+        self.cssurls=[]
+        
+    def start_link(self,attrs):
+        for key,value in attrs:
+            if key=='href' or key=='HREF':
+                # Avoid duplicates in the list of CSS URLs.
+                if not self.cssurls.count(value):
+                    self.cssurls.append(value)
+
+def get_html_list(cfile):
+    '''
+    retrieves the list of HTML files contained into the CHM file, **in order** (that's the important bit).
+    (actually performed by the PageLister class)
+    '''
+    topicstree=cfile.GetTopicsTree()
+    lister=PageLister()
+    lister.feed(topicstree)
+    #print 'lister pages',lister.pages
+    return lister.pages
+
+def get_objective_urls_list(filename):
+    '''
+    takes the list of files inside the chm archive, with the correct urls of each one.
+    '''
+
+    os.system('enum_chmLib '+filename+' > '+CHM2PDF_WORK_DIR+'/urlslist.txt')
+    flist=open(CHM2PDF_WORK_DIR+'/urlslist.txt','rU')
+    urls_list=[]
+    for line in flist.readlines()[3:]:
+        #print 'line',line
+        spline=line.split()
+        urls_list.append(spline[5])
+    flist.close()
+    # os.remove(CHM2PDF_WORK_DIR+'/urlslist.txt')
+    
+    return urls_list
+
+
+def correct_file(input_file, output_file, html_list, objective_urls, options):
+
+    # Correct image links in file
+    pf=open(input_file,'rU')
+    page=pf.read()
+    pf.close()
+        
+    # Correct the HTML markup of the page, if the --beautifulsoup was passed.
+    if options['beautifulsoup']=='--beautifulsoup':
+        from BeautifulSoup import BeautifulSoup, Tag
+        soup = BeautifulSoup(page)
+        page = str(soup)
+
+    image_catcher=ImageCatcher()
+    image_catcher.feed(page)
+        
+    css_catcher=CssCatcher()
+    css_catcher.feed(page)
+        
+    # We substitute the image URLs of input_file with the *actual* URLs on the CHM2PDF_ORIG_DIR directory
+    for iurl in image_catcher.imgurls:
+        # print 'iurl = '  + iurl
+
+        img_filename = ''
+        for item in objective_urls:
+            if iurl in item:
+                img_filename=CHM2PDF_ORIG_DIR+item
+                if ';' in img_filename: #hack to get rid of mysterious ; in filenames and urls...
+                    img_filename=img_filename.split(';')[0]
+        # substitute the new image filenames - but only if an img_filename was found!
+        if img_filename:
+            page=re.sub(iurl,img_filename,page)
+            
+
+    # We substitute the CSS URLs of input_file with the *actual* URLs on the CHM2PDF_ORIG_DIR directory
+    for curl in css_catcher.cssurls:
+        # print 'curl = '  + curl
+
+        css_filename = ''
+        for item in objective_urls:
+            if curl in item:
+                css_filename=CHM2PDF_ORIG_DIR+item
+                if ';' in css_filename: #hack to get rid of mysterious ; in filenames and urls...
+                    css_filename=img_filename.split(';')[0]
+        # substitute the new image filenames - but only if a css_filename was found!
+        if css_filename:
+            page=re.sub(curl,css_filename,page)
+            
+    # Fontsize hack:
+    # Since htmldoc ignores the --fontsize option, we have to do something about it...
+    # If --fontsize xxx was given on the command line, 
+    # insert <font> and </font> tags between <p> and </p>.
+    # While doing so, use xxx as the value of the size attribute of the font tag.
+    if options['fontsize']:
+        # page=re.sub('(<p[^>]*>)','\\1' + os.linesep + '<font size="' + options['fontsize'] + '">' + os.linesep, page)
+        # page=re.sub('(<\/p[^>]*>)', os.linesep + '</font>' + os.linesep + '\\1' + os.linesep, page)
+
+        # page=re.sub('(<body[^>]*>)','\\1<basefont size="' + options['fontsize'] + '">' + '<font size="' + options['fontsize'] + '" face="' + options['bodyfont'] + '">',page)
+        # page=re.sub('(<\/body[^>]*>)','</font>' + '</basefont>\\1',page)
+
+        # page=re.sub('(<table[^>]*>)','\\1' + os.linesep + '<font size="' + options['fontsize'] + '">' + os.linesep, page)
+        # page=re.sub('(<\/table[^>]*>)', os.linesep + '</font>' + os.linesep + '\\1' + os.linesep, page)
+
+        # page=re.sub('(<body[^>]*>)','\\1' + '<basefont size="4"> <font size="' + options['fontsize'] + '" face="' + options['bodyfont'] + '">',page)
+        page=re.sub('(<body[^>]*>)','\\1' + '<font size="' + options['fontsize'] + '" face="' + options['bodyfont'] + '">',page)
+        page=re.sub('(<\/body[^>]*>)','</font>' + '\\1',page)
+
+    # Delete unwanted HTML elements.
+    page=re.sub('<div .*teamlib\.gif.*\/div>','', page)
+    page=re.sub('<a href.*next\.gif[^>]*><\/a>','' ,page)
+    page=re.sub('<a href.*previous\.gif[^>]*><\/a>','', page)
+    page=re.sub('<a href.*prev\.gif[^>]*><\/a>','', page)
+    page=re.sub('"[^"]*previous\.gif"','""', page)
+    page=re.sub('"[^"]*prev\.gif"','""', page)
+    page=re.sub('"[^"]*next\.gif"','""', page)
+
+    # Delete CSS markup (<link rel="stylesheet"...)
+    # Currently, htmldoc chokes on CSS. In some distant, bright future things will be different, but until then...
+    # I know, it is silly to try to correct the CSS URLs as above, only to delete them here, just a few lines later.
+    # But this is the right way to proceed - when htmldoc comes with CSS support we will only have
+    # to remove the following one line and we will take full advantage of CSS, since the corrected CSS URLs will
+    # already be there. ;-)
+    page=re.sub('<link *rel="[Ss][Tt][Yy][Ll][Ee][Ss][Hh][Ee][Ee][Tt]"[^>]*>','', page)
+
+    # Change font size between <pre> and </pre> to the value given by the '--prefontsize' option.
+    if options['prefontsize'] != '':
+        page=re.sub('<pre>','<pre><font size="' + options['prefontsize'] + '">', page)
+        page=re.sub('<\/pre>','</font></pre>', page)
+
+
+    # Correct the HTML markup of the page, if the --beautifulsoup was passed.
+    if options['beautifulsoup']=='--beautifulsoup':
+        # from BeautifulSoup import BeautifulSoup
+        soup = BeautifulSoup(page)
+        # page = soup.prettify()
+
+        # top_vevel_table = soup.table
+        # top_vevel_table.extract()
+        # top_vevel_table['width'] = options['browserwidth']
+
+#         tables=soup.findAll('table')
+#         for table in tables:
+#             # table['cellpadding'] = '0.15in'
+#             table['border'] = '1'
+#             table['width'] = '95%'
+#             # table['width'] = options['browserwidth']
+
+#             trs=table.findAll('tr')
+#             for tr in trs:
+#                 tds=tr.findAll('td')
+#                 for td in tds:
+#                     # print td.find(text=True)
+#                     # td['cellpadding'] = '0.15in'
+#                     # td['nowrap'] = 'false'
+#                     # if td.content != None:
+#                     for tag in td.contents:
+#                         if tag.__class__.__name__ == 'NavigableString' and (tag == "\n" or tag == ''):
+#                             print 'The following is of class ' + tag.__class__.__name__ + ' and is empty: '
+#                             print '-->' + tag + '<--'
+#                             tag.extract
+#                             # print td.content
+#                             # td.string = re.sub('^[\n\t\r ]*$', '', td.string)
+#                             # if td.string == '':
+#                             #     td.extract()
+
+#         pixelimgs=soup.findAll('img', {"width" : "1", "height" : "1"})
+#         for pixelimg in pixelimgs:
+#             pixelimg.extract()
+
+#         divs=soup.findAll('div')
+#         for div in divs:
+#             if div.string == None or div.string == os.linesep:
+#                 div.extract()
+#             # else:
+#             #     print '-->"' + div.string + '"'
+
+
+        pres = soup.findAll('pre')
+        line_regex = re.compile(r'^.*$', re.MULTILINE)
+        for pre in pres:
+
+            pre['width'] = '50'
+
+#             font_tag = Tag(BeautifulSoup(), 'font')
+#             font_tag['size'] = '-1'
+#             pre.insert(0, font_tag)
+
+            texts_with_linesep = pre.findAll(text=line_regex, recursive=True)
+            for text in texts_with_linesep:
+                newtext=re.sub(os.linesep,'<br>',text.string)
+#                 print "#########################################################################"
+#                 print text
+#                 print "#########################################################################"
+#                 print
+#                 print
+                text.replaceWith(newtext)
+
+
+        # page = soup.prettify()
+        page = str(soup)
+
+
+    f=open(output_file,'w')
+    f.write(page)
+    f.close()
+
+
+def convert_to_pdf(cfile, filename, outputfilename, options):
+    '''
+    Performs actual converting.
+    '''
+
+    # Extract the files from the CHM archive and correct them ONLY IF '--dontextract' was NOT given!
+    # ########################### File extraction and correction: START ############################
+    #
+    if options['dontextract'] == '':
+    
+        try:
+            os.mkdir(CHM2PDF_TEMP_WORK_DIR)
+        except OSError: # The directory already exists.
+            pass
+        
+        try:
+            os.mkdir(CHM2PDF_TEMP_ORIG_DIR)
+        except OSError: # The directory already exists.
+            pass
+        
+        try:
+            os.mkdir(CHM2PDF_ORIG_DIR)
+        except OSError: # The directory already exists.
+            pass
+        
+        try:
+            os.mkdir(CHM2PDF_WORK_DIR)
+        except OSError: # The directory already exists.
+            pass
+   
+    # Compute filenames and lists. This is needed no matter if '--dontextract' was given or not!
+     
+    html_list=get_html_list(cfile)
+    objective_urls=get_objective_urls_list(filename)
+
+    # print 'objective_urls'
+    # print '=============='
+    # print objective_urls
+    # print
+    # print 'html_list'
+    # print '========='
+    # print html_list
+
+    true_html_list=[] #Should mostly coincide with html_list, but...
+   
+    input_titlefile = '' 
+    output_titlefile = '' 
+    for html_file in html_list:
+        for item in objective_urls:
+            if html_file in item:
+                true_html_list.append(CHM2PDF_ORIG_DIR+item)
+            if not options['titlefile']=='' and options['titlefile'] in item:
+                input_titlefile = CHM2PDF_ORIG_DIR+item
+                output_titlefile = CHM2PDF_WORK_DIR + os.sep + options['titlefile']
+
+    if not options['titlefile']=='' and not output_titlefile:
+        print '### WARNING: ' + options['titlefile'] + ' not found inside ' + filename + ' - possible spelling error.'
+        print '### You can check it if you do  \'' + sys.argv[0] + ' --extract-only\','
+        print '### then have a look at the files in  ' + CHM2PDF_ORIG_DIR + '.'
+        print '### Option \'--titlefile ' + options['titlefile'] + '\' ignored'
+        options['titlefile'] = ''
+
+
+    # Process toc file. This depends on the '--dontextract' option.
+    
+    if options['dontextract'] == '':
+        # Correct image links in toc file.
+        if not options['titlefile']=='' and os.path.exists(input_titlefile):
+            correct_file(input_titlefile, output_titlefile, html_list, objective_urls, options)
+
+    
+    # Now process the rest of HTML files.
+
+    # Compute some lists. Again, this is independent of the '--dontextract' option.
+
+    c=0
+    htmlout_filename_list=''
+    htmlout_filenames = []
+    if output_titlefile:
+        htmlout_filenames.append(output_titlefile)
+    match_strings = []
+    replace_strings = []
+    replace_garbled_strings = []
+    for url in html_list:
+        c+=1
+        page_filename=CHM2PDF_ORIG_DIR + url
+        # Some names contain a '%20' (an HTML code for a space). We substitute with a "real space"
+        # otherwise a 'File not found' error will occur.
+        page_filename = re.sub('%20',' ',page_filename)
+        
+        if options['verbose']=='--verbose' and options['verbositylevel']=='high' and options['dontextract'] == '':
+            print "Correcting " + page_filename
+
+ 
+        if os.path.exists(page_filename) and (options['titlefile'] == '' or not options['titlefile'] in url):
+            htmlout_filename=CHM2PDF_WORK_DIR+'/temp'+'%(#)04d' %{"#":c}+'.html'
+            htmlout_filename_list+=' '+ htmlout_filename
+            htmlout_filenames.append(htmlout_filename)
+    
+            if options['dontextract'] == '':
+                # Correct image links in file page_filename.
+                correct_file(page_filename, htmlout_filename, html_list, objective_urls, options)
+
+            # Escape slashes in url.
+            url_filename_escaped = re.sub('/', '\/', os.path.basename(url))
+            # Escape dots in url.
+            url_filename_escaped = re.sub('\.', '\.', url_filename_escaped)
+            # Escape slashes in htmlout_filename.
+            htmlout_filename_escaped = re.sub('/', '\/', os.path.basename(htmlout_filename))
+            # Compute a "garbled" htmlout_filename, where dots are simply replaced with underscores.
+            htmlout_filename_escaped_garbled = re.sub('\.', '_', htmlout_filename_escaped)
+
+            # Build a list for each of the three strings (the original URL, the output filename and the garbled one).
+            # The idea is that we want to replace the match_strings with the corresponding replace_garbled_strings first.
+            # Then, in a second pass, we will replace the garbled strings with the "real" replace_strings.
+            # This trick is necessary to avoid problems in cases where the original URLs look like
+            #
+            # 0001.html, 0002.html, 0003.html...
+            #
+            # and we want to replace as follows:
+            #
+            # toc.html	-> temp0001.html
+            # 0001.html	-> temp0002.html
+            # 0002.html -> temp0003.html
+            # 0003.html -> temp0004.html
+            #
+            # If we try it "directly", i.e. without the "garbled" names first, we will end up changing:
+            #
+            # tol.html	-> temp0001.html -> temptemp0002.html -> temptemptemp0003.html ...
+            # 0001.html	-> temp0002.html -> temptemp0003.html -> temptemptemp0004.html ...
+            # ...
+            # 
+            # which is not what we want.
+            match_strings.append(url_filename_escaped)
+            replace_strings.append(htmlout_filename_escaped)
+            replace_garbled_strings.append(htmlout_filename_escaped_garbled)
+        
+    # Now we've got the lists computed. We proceed with the actual correction,
+    # which IS dependent on the '--dontextract' option:
+
+    if options['dontextract'] == '':
+        # Correct links to files in the local collection.
+        if options['verbose']=='--verbose' and options['verbositylevel']=='low':
+            print 'Correcting links in the HTML files...'
+    
+        if options['verbose']=='--verbose' and options['verbositylevel']=='high':
+            print '############### 1st pass ###############'
+        for match_string in  match_strings:
+            replace_string = replace_garbled_strings[match_strings.index(match_string)]
+            if options['verbose']=='--verbose' and options['verbositylevel']=='high':
+                print "match " + match_string + ' ' + "and replace it with " + replace_string
+        if options['verbose']=='--verbose' and options['verbositylevel']=='high':
+            print
+            
+        if options['verbose']=='--verbose' and options['verbositylevel']=='high':
+            print '############### 2nd pass ###############'
+        for match_string in  replace_garbled_strings:
+            replace_string = replace_strings[replace_garbled_strings.index(match_string)]
+            if options['verbose']=='--verbose' and options['verbositylevel']=='high':
+                print "match " + match_string + ' ' + "and replace it with " + replace_string
+        if options['verbose']=='--verbose' and options['verbositylevel']=='high':
+            print
+            
+        for filename in htmlout_filenames:
+            
+            pf=open(filename,'rU')
+            page=pf.read()
+            pf.close()
+    
+            # Substitutions in 1st pass: we replace the original filenames with their corresponding "garbled" equivalents.
+            for match_string in  match_strings:
+                replace_string = replace_garbled_strings[match_strings.index(match_string)]
+                page = re.sub(match_string, replace_string, page)
+            
+    
+            # Substitutuions in the 2nd pass: we replace the garbled filenames with the correct ones.
+            for match_string in  replace_garbled_strings:
+                replace_string = replace_strings[replace_garbled_strings.index(match_string)]
+                page = re.sub(match_string, replace_string, page)
+    
+            # Replace links of the form "somefile.html#894" with "somefile0206.html"        
+            # The following will match anchors like '<a href="temp0206.html#894"' and will store the 'temp0206.html' in backreference 1.
+            # The replace string will then replace it with '<a href="temp0206.html"', i.e. it will take away the '#894' part.
+            # This is because the numbers after the '#' are often wrong or non-existent. It is better to link to an existing 
+            # chapter than to a non-existent part of an existing chapter.
+            page = re.sub('<a href="([^#]*)#[^"]*"', '<a href="\\1"', page)
+    
+            pf=open(filename,'w')
+            pf.write(page)
+            pf.close
+
+    # Here ends the extraction and correction of the HTML files which, as said above,
+    # will take place ONLY IF '--dontextract' was NOT given.
+    # If '--dontextract' was given, only the file lists like htmlout_filename_list 
+    # were computed above, but no file extraction or correction took place.
+    #
+    # ########################### File extraction and correction: END   ############################
+
+    # Stop here if '--extract-only' was given...
+    if options['extract-only'] == '--extract-only':
+        return
+
+    # ...otherwise continue with PDF generation.
+
+    if options['verbose']=='--verbose' and options['verbositylevel']=='low':
+        print 'Producing the PDF from the '+str(c)+' individual HTML files...'
+
+    htmldoc_opts = ''
+    # print options
+    for key in options.keys():
+        value = options[key]
+        if not value == '':
+            if   key=='bodycolor': htmldoc_opts += ' --bodycolor ' + value
+            elif key=='bodyfont': htmldoc_opts += ' --bodyfont ' + value
+            elif key=='bodyimage': htmldoc_opts += ' --bodyimage ' + value
+            elif key=='book': htmldoc_opts += ' ' + value
+            elif key=='bottom': htmldoc_opts += ' --bottom ' + value
+            elif key=='browserwidth': htmldoc_opts += ' --browserwidth ' + value
+            elif key=='charset': htmldoc_opts += ' --charset ' + value
+            elif key=='color': htmldoc_opts += ' ' + value
+            elif key=='compression': htmldoc_opts += ' --compression=' + value
+            elif key=='continuous': htmldoc_opts += ' ' + value
+            elif key=='cookies': htmldoc_opts += ' --cookies ' + value
+            elif key=='datadir': htmldoc_opts += ' --datadir ' + value
+            elif key=='duplex': htmldoc_opts += ' ' + value
+            elif key=='effectduration': htmldoc_opts += ' --effectduration ' + value
+            elif key=='embedfonts': htmldoc_opts += ' ' + value
+            elif key=='encryption': htmldoc_opts += ' ' + value
+            elif key=='firstpage': htmldoc_opts += ' --firstpage ' + value
+            elif key=='fontsize': htmldoc_opts += ' --fontsize ' + value
+            elif key=='fontspacing': htmldoc_opts += ' --fontspacing ' + value
+            elif key=='footer': htmldoc_opts += ' --footer ' + value
+            elif key=='format': htmldoc_opts += ' --format ' + value
+            elif key=='gray': htmldoc_opts += ' ' + value
+            elif key=='header': htmldoc_opts += ' --header ' + value
+            elif key=='header1': htmldoc_opts += ' --header1 ' + value
+            elif key=='headfootfont': htmldoc_opts += ' --headfootfont ' + value
+            elif key=='headfootsize': htmldoc_opts += ' --headfootsize ' + value
+            elif key=='headingfont': htmldoc_opts += ' --headingfont ' + value
+            elif key=='help': htmldoc_opts += ' ' + value
+            elif key=='hfimage0': htmldoc_opts += ' --hfimage0 ' + value
+            elif key=='hfimage1': htmldoc_opts += ' --hfimage1 ' + value
+            elif key=='hfimage2': htmldoc_opts += ' --hfimage2 ' + value
+            elif key=='hfimage3': htmldoc_opts += ' --hfimage3 ' + value
+            elif key=='hfimage4': htmldoc_opts += ' --hfimage4 ' + value
+            elif key=='hfimage5': htmldoc_opts += ' --hfimage5 ' + value
+            elif key=='hfimage6': htmldoc_opts += ' --hfimage6 ' + value
+            elif key=='hfimage7': htmldoc_opts += ' --hfimage7 ' + value
+            elif key=='hfimage8': htmldoc_opts += ' --hfimage8 ' + value
+            elif key=='hfimage9': htmldoc_opts += ' --hfimage9 ' + value
+            elif key=='jpeg': htmldoc_opts += ' --jpeg=' + value
+            elif key=='landscape': htmldoc_opts += ' ' + value
+            elif key=='left': htmldoc_opts += ' --left ' + value
+            elif key=='linkcolor': htmldoc_opts += ' --linkcolor ' + value
+            elif key=='links': htmldoc_opts += ' ' + value
+            elif key=='linkstyle': htmldoc_opts += ' --linkstyle ' + value
+            elif key=='logoimage': htmldoc_opts += ' --logoimage ' + value
+            elif key=='logoimage': htmldoc_opts += ' --logoimage ' + value
+            elif key=='no-compression': htmldoc_opts += ' ' + value
+            elif key=='no-duplex': htmldoc_opts += ' ' + value
+            elif key=='no-embedfonts': htmldoc_opts += ' ' + value
+            elif key=='no-encryption': htmldoc_opts += ' ' + value
+            elif key=='no-links': htmldoc_opts += ' ' + value
+            elif key=='no-localfiles': htmldoc_opts += ' ' + value
+            elif key=='no-numbered': htmldoc_opts += ' ' + value
+            elif key=='no-overflow': htmldoc_opts += ' ' + value
+            elif key=='no-strict': htmldoc_opts += ' ' + value
+            elif key=='no-title': htmldoc_opts += ' ' + value
+            elif key=='no-toc': htmldoc_opts += ' ' + value
+            elif key=='numbered': htmldoc_opts += ' ' + value
+            elif key=='nup': htmldoc_opts += ' --nup ' + value
+            elif key=='outfile': htmldoc_opts += ' --outfile ' + value
+            elif key=='overflow': htmldoc_opts += ' ' + value
+            elif key=='owner-password': htmldoc_opts += ' --owner-password ' + value
+            elif key=='pageduration': htmldoc_opts += ' --pageduration ' + value
+            elif key=='pageeffect': htmldoc_opts += ' --pageeffect ' + value
+            elif key=='pagelayout': htmldoc_opts += ' --pagelayout ' + value
+            elif key=='pagemode': htmldoc_opts += ' --pagemode ' + value
+            elif key=='path': htmldoc_opts += ' --path ' + value
+            elif key=='permissions': htmldoc_opts += ' --permissions ' + value
+            elif key=='portrait': htmldoc_opts += ' ' + value
+            elif key=='quiet': htmldoc_opts += ' ' + value
+            elif key=='right': htmldoc_opts += ' --right ' + value
+            elif key=='size': htmldoc_opts += ' --size ' + value
+            elif key=='strict': htmldoc_opts += ' ' + value
+            elif key=='textcolor': htmldoc_opts += ' --textcolor ' + value
+            elif key=='textfont': htmldoc_opts += ' --textfont ' + value
+            elif key=='title': htmldoc_opts += ' ' + value
+            elif key=='titlefile': htmldoc_opts += ' --titlefile ' + output_titlefile
+            elif key=='titleimage': htmldoc_opts += ' --titleimage ' + value
+            elif key=='tocfooter': htmldoc_opts += ' --tocfooter ' + value
+            elif key=='tocheader': htmldoc_opts += ' --tocheader ' + value
+            elif key=='toclevels': htmldoc_opts += ' --toclevels ' + value
+            elif key=='toctitle': htmldoc_opts += ' --toctitle ' + value
+            elif key=='top': htmldoc_opts += ' --top ' + value
+            elif key=='user-password': htmldoc_opts += ' --user-password ' + value
+            elif key=='version': htmldoc_opts += ' ' + value
+            elif key=='webpage': htmldoc_opts += ' ' + value
+           
+    if options['verbose']=='--verbose' and options['verbositylevel']=='high':
+        print 'htmldoc' + htmldoc_opts + ' ' + htmlout_filename_list + " -f "+ outputfilename + " > /dev/null"
+    exit_value=os.system ('htmldoc' + htmldoc_opts + ' ' + htmlout_filename_list + " -f "+ outputfilename + " > /dev/null")
+
+    if exit_value != 0:
+        print 'Something wrong happened when launching htmldoc.'
+        print 'exit value: ',exit_value
+        print 'Check if output exists or if it is good.'
+    else: 
+        print 'Written file ' + outputfilename
+    print 'Done.'    
+
+def usage (name):
+    print 'Usage:'
+    print "\t%s [options] input_filename [output_filename]" % name
+    print
+    print 'Options:'
+    print
+    print '\t--beautifulsoup\n\t\tCorrect the HTML code of the pages before converting them to PDF. The BeautifulSoup package (see http://www.crummy.com/software/BeautifulSoup/) needs to be installed.'
+    print '\t--bodycolor color\n\t\tSpecifies the background color for all pages.'
+    print '\t--bodyfont {courier,helvetica,monospace,sans,serif,times}. Default is times.'
+    print '\t--bodyimage filename.{bmp,gif,jpg,png}'
+    print '\t--book\n\t\tSpecifies that the HTML sources are structured (headings, chapters, etc.).'
+    print '\t--bottom margin{in,cm,mm}\n\t\tSpecifies the bottom margin in points (no suffix or ##pt), inches  (##in),  centimeters  (##cm),  or millimeters (##mm).'
+    print '\t--browserwidth pixels\n\t\tSee http://www.htmldoc.org/newsgroups.php?ghtmldoc.general+v:3465'
+    print '\t--charset {cp-874...1258,iso-8859-1...8859-15,koi8-r}\n\t\tSpecifies the ISO character set to use for the output.'
+    print '\t--color\n\t\tSpecifies that PDF output should be in color.'
+    print '\t--compression[=level]\n\t\t'
+    print '\t--continuous\n\t\tSpecifies  that  the  HTML  sources are unstructured (plain web pages).\n\t\tNo page breaks are inserted between each file or URL in the output.'
+    print '\t--cookies \'name="value with space"; name=value\'\n\t\t'
+    print '\t--datadir directory\n\t\tSpecifies the  location  of  the  HTMLDOC  data  files,  usually  /usr/share/htmldoc  or  C:\Program Files\HTMLDOC '
+    print "\t--dontextract \n\t\tIf given, %s will not extract the HTML files from the given CHM file, but will use previously extracted copies from the temporary directory " %name + '(i.e. ' + CHM2PDF_TEMP_ORIG_DIR + ' and ' + CHM2PDF_TEMP_WORK_DIR + '). Usually you will use this option after you have used the \'--extract-only\' option to extract the files in order to correct them manually (in ' + CHM2PDF_TEMP_WORK_DIR + '). After the correction, a call with \'--dontextract\' will not overwrite your changes, but will use the corrected files instead.'
+    print '\t--duplex\n\t\tSpecifies that the output should be formatted for double-sided printing.'
+    print '\t--effectduration {0.1..10.0}\n\t\tSpecifies the duration in seconds of PDF page transition effects.'
+    print '\t--embedfonts\n\t\tSpecifies that fonts should be embedded in PDF output.'
+    print '\t--encryption\n\t\tEnables encryption of PDF files.'
+    print '\t--extract-only\n\t\tExtract the HTML files from the CHM file and stop.\n\t\tThe extracted files will be found in CHM2PDF_WORK_DIR/input_filename_without_extension.'
+    print '\t--firstpage {p1,toc,c1}\n\t\t'
+    print '\t--fontsize {4.0..24.0}\n\t\tSpecifies the default font size for body text.'
+    print '\t--fontspacing {1.0..3.0}\n\t\tSpecifies  the  default  line  spacing  for body text.\n\t\tThe line spacing is a multiplier for the font size, so a value of 1.2 \n\t\twill provide an additional 20% of space between the lines.'
+    print '\t--footer fff\n\t\t'
+    print '\t{--format, -t} {pdf11,pdf12,pdf13,pdf14}\n\t\tSpecifies the output format: pdf11\n\t\tpdf11 (PDF 1.1/Acrobat 2.0), pdf12 (PDF 1.2/Acrobat 3.0), \n\t\tpdf or pdf13 (PDF  1.3/Acrobat  4.0),  or  pdf14 (PDF 1.4/Acrobat 5.0)'
+    print '\t--gray\n\t\t'
+    print '\t--header fff\n\t\t'
+    print '\t--header1 fff\n\t\t'
+    print '\t--headfootfont {courier{-bold,-oblique,-boldoblique}, \n\t\thelvetica{-bold,-oblique,-boldoblique}, \n\t\tmonospace{-bold,-oblique,-boldoblique}, \n\t\tsans{-bold,-oblique,-boldoblique}, \n\t\tserif{-bold,-italic,-bolditalic}, \n\t\ttimes{-roman,-bold,-italic,-bolditalic}} \n\t\t\tSets the font to use on headers and footers.'
+    print '\t--headfootsize {6.0..24.0}\n\t\tSets the size of the font to use on headers and footers.'
+    print '\t--headingfont {courier,helvetica,monospace,sans,serif,times}\n\t\tSets the typeface to use for headings.'
+    print '\t--help\n\t\tDisplays a summary of command-line options.'
+    print '\t--hfimage0 filename.{bmp,gif,jpg,png}\n\t\t '
+    print '\t--hfimage1 filename.{bmp,gif,jpg,png}\n\t\t '
+    print '\t--hfimage2 filename.{bmp,gif,jpg,png}\n\t\t '
+    print '\t--hfimage3 filename.{bmp,gif,jpg,png}\n\t\t '
+    print '\t--hfimage4 filename.{bmp,gif,jpg,png}\n\t\t '
+    print '\t--hfimage5 filename.{bmp,gif,jpg,png}\n\t\t '
+    print '\t--hfimage6 filename.{bmp,gif,jpg,png}\n\t\t '
+    print '\t--hfimage7 filename.{bmp,gif,jpg,png}\n\t\t '
+    print '\t--hfimage8 filename.{bmp,gif,jpg,png}\n\t\t '
+    print '\t--hfimage9 filename.{bmp,gif,jpg,png}\n\t\t '
+    print '\t--jpeg quality\n\t\tSets the JPEG compression level to use for large images. A value of 0 disables JPEG compression.'
+    print '\t--landscape\n\t\t'
+    print '\t--left margin{in,cm,mm}\n\t\tSpecifies the left margin in points (no suffix or ##pt), inches (##in), centimeters (##cm), or  millimeters (##mm).'
+    print '\t--linkcolor color\n\t\tSets the color of links. You can use well-known color names like blue, or the usual #RRGGBB notation.'
+    print '\t--links\n\t\tEnables generation of links in PDF files (default).'
+    print '\t--linkstyle {plain,underline}\n\t\tSets the style of links.'
+    print '\t--logoimage filename.{bmp,gif,jpg,png}\n\t\tSpecifies an image to be used as a logo in the header or footer in a PDF document.'
+    print '\t--logoimage filename.{bmp,gif,jpg,png}\n\t\tNote that you need to use the --header and/or --footer options with the l parameter.'
+    print '\t--no-compression\n\t\tDisables compression of PDF file.'
+    print '\t--no-duplex\n\t\tDisables double-sided printing.'
+    print '\t--no-embedfonts\n\t\tSpecifies that fonts should not be embedded in PDF and PostScript output.'
+    print '\t--no-encryption\n\t\tDisables document encryption.'
+    print '\t--no-links\n\t\tDisables generation of links in a PDF document. '
+    print '\t--no-localfiles\n\t\t'
+    print '\t--no-numbered\n\t\tDisables automatic heading numbering.'
+    print '\t--no-overflow\n\t\t'
+    print '\t--no-strict\n\t\tDisables strict HTML input checking.'
+    print '\t--no-title\n\t\tDisables generation of a title page.'
+    print '\t--no-toc\n\t\tDisables generation of a table of contents.'
+    print '\t--numbered\n\t\tNumbers all headings in a document.'
+    print '\t--nup {1,2,4,6,9,16}\n\t\tSets  the  number of pages that are placed on each output page.  Valid values are 1, 2, 4, 6, 9, and 16.'
+    print '\t{--outfile, -f} filename{.pdf}\n\t\tSpecifies the name of the output file. If no ending is given, ".pdf" is used.'
+    print '\t--overflow\n\t\t'
+    print '\t--owner-password password\n\t\tSets the owner password for encrypted PDF files.'
+    print '\t--pageduration {1.0..60.0}\n\t\tSets the view duration of a page in a PDF document.'
+    print '\t--pageeffect {none,bi,bo,d,gd,gdr,gr,hb,hsi,hso,vb,vsi,vso,wd,wl,wr,wu}\n\t\tSpecifies the page transition effect for all pages; this attribute is ignored by all Adobe PDF viewers.. '
+    print '\t--pagelayout {single,one,twoleft,tworight}\n\t\tSpecifies the initial layout of pages for a PDF file.'
+    print '\t--pagemode {document,outline,fullscreen}\n\t\tSpecifies the initial viewing mode for a PDF file.'
+    print '\t--path "dir1;dir2;dir3;...;dirN"\n\t\tSpecifies a search path for files in a document.'
+    print '\t--permissions {all,annotate,copy,modify,print,no-annotate,no-copy,no-modify,no-print,none}\n\t\tSpecifies document permissions for encrypted PDF files. Separate multiple permissions with commas. '
+    print '\t--portrait\n\t\t'
+    print '\t--prefontsize {4.0..24.0, small, normal, big, huge, +1, +2, -1, -2,...whatever}\n\t\tSpecifies the font size for text inside <pre> tags. Whatever you pass here will be used as font size inside preformatted pieces of text (usually code snippets, console output, program messages...). Effective only together with the \'--beautifulsoup\' option.'
+    print '\t--quiet\n\t\tSuppresses all messages, even error messages.'
+    print '\t--right margin{in,cm,mm}\n\t\tSpecifies the right margin in points (no suffix or ##pt), inches (##in), centimeters (##cm), or millimeters (##mm).'
+    print '\t--size {letter,a4,WxH{in,cm,mm},etc}\n\t\tSpecifies the page size using a standard name or in points (no suffix or ##x##pt), inches (##x##in),\n\t\tcentimeters (##x##cm), or millimeters (##x##mm). The standard sizes that  are  currently  recognized\n\t\tare "letter" (8.5x11in), "legal" (8.5x14in), "a4" (210x297mm), and "universal" (8.27x11in).'
+    print '\t--strict\n\t\tEnables strict HTML input checking.'
+    print '\t--textcolor color\n\t\tSpecifies the default color of all text.'
+    print '\t--textfont {courier,helvetica,monospace,sans,serif,times}\n\t\t'
+    print '\t--title\n\t\tEnables the generation of a title page.'
+    print '\t--titlefile filename.{htm,html,shtml}\n\t\tSpecifies  the  file to use for the title page. If the file is an image then the title page\n\t\tis automatically generated using the document meta data and image title.'
+    print '\t--titleimage filename.{bmp,gif,jpg,png}\n\t\tSpecifies  the  image to use for the title page. The title page is automatically \n\t\tgenerated using the document meta data and title image.'
+    print '\t--tocfooter fff\n\t\tSets the page footer to use on table-of-contents pages. See below for the format of fff.'
+    print '\t--tocheader fff\n\t\tSets the page header to use on table-of-contents pages. See below for the format of fff.'
+    print '\t--toclevels levels\n\t\tSets the number of levels in the table-of-contents.'
+    print '\t--toctitle string\n\t\tSets the title for the table-of-contents.'
+    print '\t--top margin{in,cm,mm}\n\t\tSpecifies the top margin in points (no suffix or ##pt), inches (##in), centimeters (##cm),  or  millimeters (##mm).'
+    print '\t--user-password password\n\t\tSpecifies the user password for encryption of PDF files.'
+    print '\t--verbose\n\t\tDisplays various messages indicating the progress of the conversion process. The verbosity depends on --verbositylevel. If --verbose is not set, almost no messages will be printed. The default is \'not set\', so if you want the minimum amount of messages, just don\' use this option.'
+    print '\t--verbositylevel\n\t\tSpecifies the verbosity level of the messages. Can be either \'low\' or \'high\'. Default is low. The --verbose option must be set, otherwise this option will have no effect.'
+    print '\t--version\n\t\tDisplays the current version number.'
+    print '\t--webpage\n\t\tSpecifies  that  the  HTML  sources  are  unstructured  (plain web pages).\n\t\tA page break is inserted between each file or URL in the output.'
+    print
+    print '\tfff\n\t\tHeading format string; each \'f\' can be one of:'
+    print
+    print '\t\t\t. = blank'
+    print '\t\t\t/ = n/N arabic page numbers (1/3, 2/3, 3/3)'
+    print '\t\t\t: = c/C arabic chapter page numbers (1/2, 2/2, 1/4, 2/4, ...)'
+    print '\t\t\t1 = arabic numbers (1, 2, 3, ...)'
+    print '\t\t\ta = lowercase letters'
+    print '\t\t\tA = uppercase letters'
+    print '\t\t\tc = current chapter heading'
+    print '\t\t\tC = current chapter page number (arabic)'
+    print '\t\t\td = current date'
+    print '\t\t\tD = current date and time'
+    print '\t\t\th = current heading'
+    print '\t\t\ti = lowercase roman numerals'
+    print '\t\t\tI = uppercase roman numerals'
+    print '\t\t\tl = logo image'
+    print '\t\t\tt = title text'
+    print '\t\t\tT = current time'
+    print
+    print '### See also: http://www.karakas-online.de/forum/viewtopic.php?t=10275'
+
+def split(path):
+    if path[-1] == os.sep :
+        path, fname = path[:-1], ''
+    else:
+        path, fname = os.path.split( path )
+        fname, ext = os.path.splitext( fname )
+    return ( path, fname, ext[1:] )
+
+
+
+def main(argv):
+
+    global CHM2PDF_WORK_DIR
+    global CHM2PDF_ORIG_DIR
+
+    # Defaults
+    options={}
+    options['beautifulsoup'] = ''
+    options['bodycolor'] = ''
+    options['bodyfont'] = 'times'
+    options['bodyimage'] = ''
+    options['book'] = ''
+    options['bottom'] = ''
+    options['browserwidth'] = ''
+    options['charset'] = ''
+    options['color'] = ''
+    options['compression'] = ''
+    options['continuous'] = ''
+    options['cookies'] = ''
+    options['datadir'] = ''
+    options['dontextract'] = ''
+    options['duplex'] = '--duplex'
+    options['effectduration'] = ''
+    options['embedfonts'] = '--embedfonts'
+    options['encryption'] = ''
+    options['extract-only'] = ''
+    options['firstpage'] = ''
+    options['fontsize'] = ''
+    options['fontspacing'] = ''
+    options['footer'] = '\'c C\''
+    options['format'] = '\'pdf14\''
+    options['gray'] = ''
+    options['header'] = '\'c C\''
+    options['header1'] = ''
+    options['headfootfont'] = ''
+    options['headfootsize'] = ''
+    options['headingfont'] = ''
+    options['help'] = ''
+    options['hfimage0'] = ''
+    options['hfimage1'] = ''
+    options['hfimage2'] = ''
+    options['hfimage3'] = ''
+    options['hfimage4'] = ''
+    options['hfimage5'] = ''
+    options['hfimage6'] = ''
+    options['hfimage7'] = ''
+    options['hfimage8'] = ''
+    options['hfimage9'] = ''
+    options['jpeg'] = '\'100\''
+    options['landscape'] = ''
+    options['left'] = ''
+    options['linkcolor'] = '\'blue\''
+    options['links'] = ''
+    options['linkstyle'] = '\'plain\''
+    options['logoimage'] = ''
+    options['logoimage'] = ''
+    options['no-compression'] = ''
+    options['no-duplex'] = ''
+    options['no-embedfonts'] = ''
+    options['no-encryption'] = ''
+    options['no-links'] = ''
+    options['no-localfiles'] = ''
+    options['no-numbered'] = ''
+    options['no-overflow'] = ''
+    options['no-strict'] = ''
+    options['no-title'] = ''
+    options['no-toc'] = ''
+    options['numbered'] = ''
+    options['nup'] = ''
+    options['outfile'] = ''
+    options['overflow'] = ''
+    options['owner-password'] = ''
+    options['pageduration'] = ''
+    options['pageeffect'] = ''
+    options['pagelayout'] = ''
+    options['pagemode'] = ''
+    options['path'] = ''
+    options['permissions'] = ''
+    options['portrait'] = ''
+    options['prefontsize'] = ''
+    options['quiet'] = ''
+    options['right'] = ''
+    options['size'] = '\'a4\''
+    options['strict'] = ''
+    options['textcolor'] = ''
+    options['textfont'] = ''
+    options['title'] = ''
+    options['titlefile'] = ''
+    options['titleimage'] = ''
+    options['tocfooter'] = ''
+    options['tocheader'] = ''
+    options['toclevels'] = ''
+    options['toctitle'] = ''
+    options['top'] = ''
+    options['user-password'] = ''
+    options['verbose'] = ''
+    options['verbositylevel'] = 'low'
+    options['version'] = ''
+    options['webpage'] = ''
+
+    try:
+        opts, args = getopt.getopt(sys.argv[1:], "f:t:v:", 
+                     [
+                      "beautifulsoup",
+                      "bodycolor=",
+                      "bodyfont=",
+                      "bodyimage=",
+                      "book",
+                      "bottom=",
+                      "browserwidth=",
+                      "charset=",
+                      "color",
+                      "compression=",
+                      "continuous",
+                      "cookies=",
+                      "datadir=",
+                      "dontextract",
+                      "duplex",
+                      "effectduration=",
+                      "embedfonts",
+                      "encryption",
+                      "extract-only",
+                      "firstpage=",
+                      "fontsize=",
+                      "fontspacing=",
+                      "footer=",
+                      "format=",
+                      "gray",
+                      "header=",
+                      "header1=",
+                      "headfootfont=",
+                      "headfootsize=",
+                      "headingfont=",
+                      "help",
+                      "hfimage0=",
+                      "hfimage1=",
+                      "hfimage2=",
+                      "hfimage3=",
+                      "hfimage4=",
+                      "hfimage5=",
+                      "hfimage6=",
+                      "hfimage7=",
+                      "hfimage8=",
+                      "hfimage9=",
+                      "jpeg=",
+                      "landscape",
+                      "left=",
+                      "linkcolor=",
+                      "links",
+                      "linkstyle=",
+                      "logoimage=",
+                      "logoimage=",
+                      "no-compression",
+                      "no-duplex",
+                      "no-embedfonts",
+                      "no-encryption",
+                      "no-links",
+                      "no-localfiles",
+                      "no-numbered",
+                      "no-overflow",
+                      "no-strict",
+                      "no-title",
+                      "no-toc",
+                      "numbered",
+                      "nup=",
+                      "outfile=",
+                      "overflow",
+                      "owner-password=",
+                      "pageduration=",
+                      "pageeffect=",
+                      "pagelayout=",
+                      "pagemode=",
+                      "path=",
+                      "permissions=",
+                      "portrait",
+                      "prefontsize=",
+                      "quiet",
+                      "right=",
+                      "size=",
+                      "strict",
+                      "textcolor=",
+                      "textfont=",
+                      "title",
+                      "titlefile=",
+                      "titleimage=",
+                      "tocfooter=",
+                      "tocheader=",
+                      "toclevels=",
+                      "toctitle=",
+                      "top=",
+                      "user-password=",
+                      "verbose",
+                      "verbositylevel=",
+                      "version",
+                      "webpage"
+                     ])
+    except getopt.GetoptError:
+        usage(sys.argv[0])
+        sys.exit(1)
+    
+    for o, a in opts:
+        if   o == '--beautifulsoup': options['beautifulsoup'] = '--beautifulsoup'
+        elif o == '--bodycolor': options['bodycolor'] = a
+        elif o == '--bodyfont': options['bodyfont'] = a
+        elif o == '--bodyimage': options['bodyimage'] = a
+        elif o == '--book': options['book'] = '--book'
+        elif o == '--bottom': options['bottom'] = a
+        elif o == '--browserwidth': options['browserwidth'] = a
+        elif o == '--charset': options['charset'] = a
+        elif o == '--color': options['color'] = '--color'
+        elif o == '--compression': options['compression'] = a
+        elif o == '--continuous': options['continuous'] = '--continuous'
+        elif o == '--cookies': options['cookies'] = a
+        elif o == '--datadir': options['datadir'] = a
+        elif o == '--dontextract': options['dontextract'] = '--dontextract'
+        elif o == '--duplex': options['duplex'] = '--duplex'
+        elif o == '--effectduration': options['effectduration'] = a
+        elif o == '--embedfonts': options['embedfonts'] = '--embedfonts'
+        elif o == '--encryption': options['encryption'] = '--encryption'
+        elif o == '--extract-only': options['extract-only'] = '--extract-only'
+        elif o == '--firstpage': options['firstpage'] = a
+        elif o == '--fontsize': options['fontsize'] = a
+        elif o == '--fontspacing': options['fontspacing'] = a
+        elif o == '--footer': options['footer'] = a
+        elif o in ('-t', '--format'): options['format'] = a
+        elif o == '--gray': options['gray'] = '--gray'
+        elif o == '--header': options['header'] = a
+        elif o == '--header1': options['header1'] = a
+        elif o == '--headfootfont': options['headfootfont'] = a
+        elif o == '--headfootsize': options['headfootsize'] = a
+        elif o == '--headingfont': options['headingfont'] = a
+        elif o == '--help': options['help'] = '--help'
+        elif o == '--hfimage0': options['hfimage0'] = a
+        elif o == '--hfimage1': options['hfimage1'] = a
+        elif o == '--hfimage2': options['hfimage2'] = a
+        elif o == '--hfimage3': options['hfimage3'] = a
+        elif o == '--hfimage4': options['hfimage4'] = a
+        elif o == '--hfimage5': options['hfimage5'] = a
+        elif o == '--hfimage6': options['hfimage6'] = a
+        elif o == '--hfimage7': options['hfimage7'] = a
+        elif o == '--hfimage8': options['hfimage8'] = a
+        elif o == '--hfimage9': options['hfimage9'] = a
+        elif o == '--jpeg': options['jpeg'] = a
+        elif o == '--landscape': options['landscape'] = '--landscape'
+        elif o == '--left': options['left'] = a
+        elif o == '--linkcolor': options['linkcolor'] = a
+        elif o == '--links': options['links'] = '--links'
+        elif o == '--linkstyle': options['linkstyle'] = a
+        elif o == '--logoimage': options['logoimage'] = a
+        elif o == '--logoimage': options['logoimage'] = a
+        elif o == '--no-compression': options['no-compression'] = '--no-compression'
+        elif o == '--no-duplex': options['no-duplex'] = '--no-duplex'
+        elif o == '--no-embedfonts': options['no-embedfonts'] = '--no-embedfonts'
+        elif o == '--no-encryption': options['no-encryption'] = '--no-encryption'
+        elif o == '--no-links': options['no-links'] = '--no-links'
+        elif o == '--no-localfiles': options['no-localfiles'] = '--no-localfiles'
+        elif o == '--no-numbered': options['no-numbered'] = '--no-numbered'
+        elif o == '--no-overflow': options['no-overflow'] = '--no-overflow'
+        elif o == '--no-strict': options['no-strict'] = '--no-strict'
+        elif o == '--no-title': options['no-title'] = '--no-title'
+        elif o == '--no-toc': options['no-toc'] = '--no-toc'
+        elif o == '--numbered': options['numbered'] = '--numbered'
+        elif o == '--nup': options['nup'] = a
+        elif o in ('-f', '--outfile'): options['outfile'] = a
+        elif o == '--overflow': options['overflow'] = '--overflow'
+        elif o == '--owner-password': options['owner-password'] = a
+        elif o == '--pageduration': options['pageduration'] = a
+        elif o == '--pageeffect': options['pageeffect'] = a
+        elif o == '--pagelayout': options['pagelayout'] = a
+        elif o == '--pagemode': options['pagemode'] = a
+        elif o == '--path': options['path'] = a
+        elif o == '--permissions': options['permissions'] = a
+        elif o == '--portrait': options['portrait'] = '--portrait'
+        elif o == '--prefontsize': options['prefontsize'] = a
+        elif o == '--quiet': options['quiet'] = '--quiet'
+        elif o == '--right': options['right'] = a
+        elif o == '--size': options['size'] = a
+        elif o == '--strict': options['strict'] = '--strict'
+        elif o == '--textcolor': options['textcolor'] = a
+        elif o == '--textfont': options['textfont'] = a
+        elif o == '--title': options['title'] = '--title'
+        elif o == '--titlefile': options['titlefile'] = a
+        elif o == '--titleimage': options['titleimage'] = a
+        elif o == '--tocfooter': options['tocfooter'] = a
+        elif o == '--tocheader': options['tocheader'] = a
+        elif o == '--toclevels': options['toclevels'] = a
+        elif o == '--toctitle': options['toctitle'] = a
+        elif o == '--top': options['top'] = a
+        elif o == '--user-password': options['user-password'] = a
+        elif o in ('-v', '--verbose'): options['verbose'] = '--verbose'
+        elif o == '--verbositylevel': options['verbositylevel'] = a
+        elif o == '--version': 
+            print sys.argv[0] + ' version ' + version
+            print 'This is free software; see the source for copying conditions.  There is NO'
+            print 'warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.'
+            return
+        elif o == '--webpage': options['webpage'] = '--webpage'
+
+    # Option validation checks
+    #
+    # Only one of '--extract-only' and '--dontextract' may be given!
+    if options['dontextract'] == '--dontextract' and options['extract-only'] == '--extract-only':
+        usage(sys.argv[0])
+        print
+        print '### Either \'--dontextract\' or \'extract-only\' may be given!'
+        print '### Only one of the two options can be present, not both!'
+        print '### See above or try \'' + sys.argv[0] + ' --help | less\' to view the help contents in less.'
+        return
+    #
+    # One of '--book' or '--webpage' MUST be given!
+    if options['extract-only'] == '' and ((options['book'] == '' and options['webpage'] == '' and options['continuous'] == '') or 
+                                          (options['book'] == '--book' and options['webpage'] == '--webpage') or
+                                          (options['book'] == '--book' and options['continuous'] == '--continuous') or
+                                          (options['webpage'] == '--webpage' and options['continuous'] == '--continuous')):
+        usage(sys.argv[0])
+        print
+        print '### Either \'--book\' or \'--webpage\' or \'--continuous\' MUST be given!'
+        print '### Only one of the three options can be present, not two, or even all three of them!'
+        print '### See above or try \'' + sys.argv[0] + ' --help | less\' to view the help contents in less.'
+        return
+
+    if len(args)==0:
+        usage(sys.argv[0])
+        return
+    elif len(args)==1:
+        filename = args[0]
+        dirname, basename, suffix = split(filename)
+        if dirname:
+            outputfilename = dirname + os.sep + basename +'.pdf'
+        else:
+            outputfilename = dirname + basename +'.pdf'
+        # print 'outputfilename = ' + outputfilename
+
+    elif len(args)==2:
+        filename = args[0]
+        dirname, basename, suffix = split(filename)
+        outputfilename = args[1]
+        # print 'outputfilename = ' + outputfilename
+    else:
+        usage(sys.argv[0])
+        return
+ 
+    CHM2PDF_WORK_DIR = CHM2PDF_TEMP_WORK_DIR + os.sep + basename
+    CHM2PDF_ORIG_DIR = CHM2PDF_TEMP_ORIG_DIR + os.sep + basename
+
+    if options['verbose']=='--verbose' and options['verbositylevel']=='low':
+        print 'CHM2PDF_WORK_DIR = ' + CHM2PDF_WORK_DIR
+        print 'CHM2PDF_ORIG_DIR = ' + CHM2PDF_ORIG_DIR
+
+    if not os.path.exists(filename):
+        print 'CHM file "' + filename + '" not found!'
+        return
+    
+    #remove temporary files
+    if options['dontextract'] == '':
+        if options['verbose']=='--verbose' and options['verbositylevel']=='high':
+            print 'Removing any previous temporary files...'
+        os.system('rm -r '+CHM2PDF_ORIG_DIR+'/*')
+        os.system('rm -r '+CHM2PDF_WORK_DIR+'/*')
+    
+    cfile = chm.CHMFile()
+    cfile.LoadCHM(filename)
+
+    if options['dontextract'] == '--dontextract':
+        if options['verbose'] == '--verbose':
+            print '\'--dontextract\' option was given. No files will be extracted from CHM.'
+            print 'Will use the files in ' + CHM2PDF_ORIG_DIR + ' and ' + CHM2PDF_WORK_DIR + '.'
+    else:
+        if options['verbose'] == '--verbose' and options['verbositylevel'] == 'high':
+            os.system('extract_chmLib ' + filename + ' ' + CHM2PDF_ORIG_DIR)
+        else:
+            os.system('extract_chmLib ' + filename + ' ' + CHM2PDF_ORIG_DIR + '&> /dev/null')
+    
+    convert_to_pdf(cfile, filename, outputfilename, options)
+
+
+if __name__ == '__main__':
+    main(sys.argv)
+    

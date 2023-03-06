@@ -102,7 +102,7 @@ def get_html_list(cfile):
     topicstree=cfile.GetTopicsTree()
     lister=PageLister()
     lister.feed(topicstree)
-    #print('lister pages',lister.pages
+    #print('lister pages',lister.pages)
     return lister.pages
 
 def get_objective_urls_list(filename):
@@ -114,7 +114,7 @@ def get_objective_urls_list(filename):
     flist=open(CHM2PDF_WORK_DIR+'/urlslist.txt','rU')
     urls_list=[]
     for line in flist.readlines()[3:]:
-        #print('line',line
+        #print('line',line)
         spline=line.split()
         urls_list.append(spline[5])
     flist.close()
@@ -144,7 +144,7 @@ def correct_file(input_file, output_file, html_list, objective_urls, options):
         
     # We substitute the image URLs of input_file with the *actual* URLs on the CHM2PDF_ORIG_DIR directory
     for iurl in image_catcher.imgurls:
-        # print('iurl = '  + iurl
+        # print('iurl = '  + iurl)
 
         img_filename = ''
         for item in objective_urls:
@@ -159,7 +159,7 @@ def correct_file(input_file, output_file, html_list, objective_urls, options):
 
     # We substitute the CSS URLs of input_file with the *actual* URLs on the CHM2PDF_ORIG_DIR directory
     for curl in css_catcher.cssurls:
-        # print('curl = '  + curl
+        # print('curl = '  + curl)
 
         css_filename = ''
         for item in objective_urls:
@@ -240,10 +240,10 @@ def correct_file(input_file, output_file, html_list, objective_urls, options):
 #                     # if td.content != None:
 #                     for tag in td.contents:
 #                         if tag.__class__.__name__ == 'NavigableString' and (tag == "\n" or tag == ''):
-#                             print('The following is of class ' + tag.__class__.__name__ + ' and is empty: '
-#                             print('-->' + tag + '<--'
+#                             print('The following is of class ' + tag.__class__.__name__ + ' and is empty: ')
+#                             print('-->' + tag + '<--')
 #                             tag.extract
-#                             # print(td.content
+#                             # print(td.content)
 #                             # td.string = re.sub('^[\n\t\r ]*$', '', td.string)
 #                             # if td.string == '':
 #                             #     td.extract()
@@ -257,7 +257,7 @@ def correct_file(input_file, output_file, html_list, objective_urls, options):
 #             if div.string == None or div.string == os.linesep:
 #                 div.extract()
 #             # else:
-#             #     print('-->"' + div.string + '"'
+#             #     print('-->"' + div.string + '"')
 
 
         pres = soup.findAll('pre')
@@ -273,11 +273,11 @@ def correct_file(input_file, output_file, html_list, objective_urls, options):
             texts_with_linesep = pre.findAll(text=line_regex, recursive=True)
             for text in texts_with_linesep:
                 newtext=re.sub(os.linesep,'<br>',text.string)
-#                 print("#########################################################################"
-#                 print(text
-#                 print("#########################################################################"
-#                 print
-#                 print
+#                 print("#########################################################################")
+#                 print(text)
+#                 print("#########################################################################")
+#                 print()
+#                 print()
                 text.replaceWith(newtext)
 
 
@@ -325,13 +325,13 @@ def convert_to_pdf(cfile, filename, outputfilename, options):
     html_list=get_html_list(cfile)
     objective_urls=get_objective_urls_list(filename)
 
-    # print('objective_urls'
-    # print('=============='
-    # print(objective_urls
-    # print
-    # print('html_list'
-    # print('========='
-    # print(html_list
+    # print('objective_urls')
+    # print('==============')
+    # print(objective_urls)
+    # print()
+    # print('html_list')
+    # print('=========')
+    # print(html_list)
 
     true_html_list=[] #Should mostly coincide with html_list, but...
    
@@ -442,7 +442,7 @@ def convert_to_pdf(cfile, filename, outputfilename, options):
             if options['verbose']=='--verbose' and options['verbositylevel']=='high':
                 print("match " + match_string + ' ' + "and replace it with " + replace_string)
         if options['verbose']=='--verbose' and options['verbositylevel']=='high':
-            print
+            print()
             
         if options['verbose']=='--verbose' and options['verbositylevel']=='high':
             print('############### 2nd pass ###############')
@@ -451,7 +451,7 @@ def convert_to_pdf(cfile, filename, outputfilename, options):
             if options['verbose']=='--verbose' and options['verbositylevel']=='high':
                 print("match " + match_string + ' ' + "and replace it with " + replace_string)
         if options['verbose']=='--verbose' and options['verbositylevel']=='high':
-            print
+            print()
             
         for filename in htmlout_filenames:
             
@@ -699,9 +699,9 @@ def usage (name):
     print('\t--verbositylevel\n\t\tSpecifies the verbosity level of the messages. Can be either \'low\' or \'high\'. Default is low. The --verbose option must be set, otherwise this option will have no effect.')
     print('\t--version\n\t\tDisplays the current version number.')
     print('\t--webpage\n\t\tSpecifies  that  the  HTML  sources  are  unstructured  (plain web pages).\n\t\tA page break is inserted between each file or URL in the output.')
-    print
+    print()
     print('\tfff\n\t\tHeading format string; each \'f\' can be one of:')
-    print
+    print()
     print('\t\t\t. = blank')
     print('\t\t\t/ = n/N arabic page numbers (1/3, 2/3, 3/3)')
     print('\t\t\t: = c/C arabic chapter page numbers (1/2, 2/2, 1/4, 2/4, ...)')
@@ -1062,13 +1062,13 @@ def main(argv):
             outputfilename = dirname + os.sep + basename +'.pdf'
         else:
             outputfilename = dirname + basename +'.pdf'
-        # print('outputfilename = ' + outputfilename
+        # print('outputfilename = ' + outputfilename)
 
     elif len(args)==2:
         filename = args[0]
         dirname, basename, suffix = split(filename)
         outputfilename = args[1]
-        # print('outputfilename = ' + outputfilename
+        # print('outputfilename = ' + outputfilename)
     else:
         usage(sys.argv[0])
         return
